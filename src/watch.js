@@ -222,11 +222,24 @@ function findLatestFile(rootDir, isCandidate) {
   return latest;
 }
 
-function findLatestFiles(rootDir, isCandidate, limit) {
+function findLatestFiles(rootDir, isCandidate, limit, fileActivity) {
   const max = Number.isFinite(Number(limit)) ? Math.max(1, Number(limit)) : 1;
   const latest = [];
+  const growing = [];
+  const seen = new Set();
+  const now = Date.now();
 
   function push(item) {
+    if (fileActivity) {
+      seen.add(item.path);
+      const previous = fileActivity.get(item.path);
+      const changedAt = previous && previous.size !== item.size ? now : previous?.changedAt || 0;
+      fileActivity.set(item.path, { size: item.size, changedAt });
+      // Windows may leave mtime unchanged while Codex holds an append handle.
+      // Follow every recently growing file, even if newer chats fill the top N.
+      if (changedAt && now - changedAt < 30000) growing.push(item);
+      item.mtimeMs = Math.max(item.mtimeMs, changedAt);
+    }
     latest.push(item);
     latest.sort((a, b) => b.mtimeMs - a.mtimeMs);
     if (latest.length > max) latest.length = max;
@@ -256,7 +269,12 @@ function findLatestFiles(rootDir, isCandidate, limit) {
   }
 
   walk(rootDir);
-  return latest;
+  if (fileActivity) {
+    for (const filePath of fileActivity.keys()) {
+      if (!seen.has(filePath)) fileActivity.delete(filePath);
+    }
+  }
+  return [...new Map([...latest, ...growing].map((item) => [item.path, item])).values()];
 }
 
 function getCodexTurnIdFromObject(obj) {
@@ -2074,6 +2092,7 @@ function startCodexWatchSessions({ intervalMs, log, confirmDetector, failureCont
   }
 
   const sessions = new Map();
+  const fileActivity = new Map();
   const state = {
     tickRunning: false
   };
@@ -2084,7 +2103,7 @@ function startCodexWatchSessions({ intervalMs, log, confirmDetector, failureCont
     try {
       if (!fs.existsSync(root)) return;
 
-      const latest = findLatestFiles(root, (_full, name) => name.toLowerCase().endsWith('.jsonl'), followTopN);
+      const latest = findLatestFiles(root, (_full, name) => name.toLowerCase().endsWith('.jsonl'), followTopN, fileActivity);
       if (!latest || latest.length === 0) return;
 
       const wanted = new Set(latest.map((x) => x.path));
